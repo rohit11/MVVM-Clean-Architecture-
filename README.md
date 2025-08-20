@@ -178,9 +178,6 @@ CryptoTracker/
 - **Dark Mode**: Enhanced theme support
 - **Widgets**: iOS home screen widgets
 
-## 📄 License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
 
 ## 🤝 Contributing
 
