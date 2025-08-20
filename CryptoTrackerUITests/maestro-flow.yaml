@@ -1,0 +1,20 @@
+# Maestro UI test flow for CryptoTracker
+---
+appId: com.rohit.swiftui.CryptoTracker
+---
+- launchApp
+- assertVisible: "Bitcoin"
+- tapOn: "Bitcoin"
+- assertVisible: "Bitcoin"
+- assertVisible: "BTC"
+- assertVisible: "Current Price:"
+- assertVisible: "View on CoinGecko"
+- back
+- assertVisible: "Ethereum"
+- tapOn: "Ethereum"
+- assertVisible: "Ethereum"
+- assertVisible: "ETH"
+- assertVisible: "Current Price:"
+- assertVisible: "View on CoinGecko"
+- back
+
