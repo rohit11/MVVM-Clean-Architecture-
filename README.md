@@ -72,7 +72,7 @@ This project follows **Clean Architecture** principles with clear separation of 
 
 1. **Clone the repository**
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/rohit11/MVVM-Clean-Architecture-.git
    cd CryptoTracker
    ```
 
@@ -188,7 +188,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## 📞 Support
 
-For support, email support@cryptotracker.com or create an issue in this repository.
+For support, email rohitnisal@gmail.com or create an issue in this repository.
 
 ---
 
