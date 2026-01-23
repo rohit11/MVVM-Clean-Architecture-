@@ -29,6 +29,9 @@ jobs:
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.PROJECTS_TOKEN }}
+          env_name: ${{ inputs.env_name }}
+          ttl_hours: ${{ inputs.ttl_hours }}
+          purpose: ${{ inputs.purpose }}
           script: |
             const envName = core.getInput('env_name').trim();
             const ttlHoursRaw = core.getInput('ttl_hours').trim();
@@ -135,7 +138,3 @@ jobs:
           OWNER_FIELD_ID: ${{ vars.OWNER_FIELD_ID }}
           PURPOSE_FIELD_ID: ${{ vars.PURPOSE_FIELD_ID }}
           EXPIRES_FIELD_ID: ${{ vars.EXPIRES_FIELD_ID }}
-        with:
-          env_name: ${{ inputs.env_name }}
-          ttl_hours: ${{ inputs.ttl_hours }}
-          purpose: ${{ inputs.purpose }}
