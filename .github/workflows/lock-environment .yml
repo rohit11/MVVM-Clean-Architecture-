@@ -1,0 +1,176 @@
+name: Lock Environment (Project Board)
+
+on:
+  workflow_dispatch:
+    inputs:
+      env_name:
+        description: "Environment row title in the Project (e.g., env-01, env-12)"
+        required: true
+        type: string
+      ttl_hours:
+        description: "How many hours to lock this env"
+        required: true
+        default: "8"
+        type: string
+      purpose:
+        description: "Why you need this env (ticket/PR/testing)"
+        required: true
+        type: string
+
+# Required so the workflow can update Projects v2
+permissions:
+  contents: read
+  projects: write
+
+jobs:
+  lock:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lock env row in Project (Status/Owner/Purpose/Expires At)
+        uses: actions/github-script@v7
+        env:
+          # Store these as Repo Variables (Settings -> Secrets and variables -> Actions -> Variables)
+          PROJECT_ID: ${{ vars.PROJECT_ID }}
+          STATUS_FIELD_ID: ${{ vars.STATUS_FIELD_ID }}
+          STATUS_INUSE_OPTION_ID: ${{ vars.STATUS_INUSE_OPTION_ID }}
+          OWNER_FIELD_ID: ${{ vars.OWNER_FIELD_ID }}
+          PURPOSE_FIELD_ID: ${{ vars.PURPOSE_FIELD_ID }}
+          EXPIRES_FIELD_ID: ${{ vars.EXPIRES_FIELD_ID }}
+        with:
+          script: |
+            // ---- Inputs ----
+            const envName = core.getInput('env_name').trim();
+            const ttlHoursRaw = core.getInput('ttl_hours').trim();
+            const purpose = core.getInput('purpose').trim();
+
+            const ttlHours = Number(ttlHoursRaw);
+            if (!Number.isFinite(ttlHours) || ttlHours <= 0) {
+              throw new Error(`ttl_hours must be a positive number. Got: "${ttlHoursRaw}"`);
+            }
+
+            // ---- Compute expiry ----
+            const expiresAt = new Date(Date.now() + ttlHours * 60 * 60 * 1000).toISOString();
+
+            // ---- Validate required IDs are present ----
+            const requiredEnvVars = [
+              "PROJECT_ID",
+              "STATUS_FIELD_ID",
+              "STATUS_INUSE_OPTION_ID",
+              "OWNER_FIELD_ID",
+              "PURPOSE_FIELD_ID",
+              "EXPIRES_FIELD_ID"
+            ];
+            for (const k of requiredEnvVars) {
+              if (!process.env[k] || process.env[k].trim().length === 0) {
+                throw new Error(`Missing env var ${k}. Add it in repo Variables (Settings -> Secrets and variables -> Actions).`);
+              }
+            }
+
+            const projectId = process.env.PROJECT_ID;
+            const statusFieldId = process.env.STATUS_FIELD_ID;
+            const inUseOptionId = process.env.STATUS_INUSE_OPTION_ID;
+            const ownerFieldId = process.env.OWNER_FIELD_ID;
+            const purposeFieldId = process.env.PURPOSE_FIELD_ID;
+            const expiresFieldId = process.env.EXPIRES_FIELD_ID;
+
+            // ---- 1) Lookup the env row (Draft item) by title (Pattern 1) ----
+            // Note: items() is paginated; for 25 envs, first:100 is fine.
+            const findItemResp = await github.graphql(`
+              query($projectId: ID!) {
+                node(id: $projectId) {
+                  ... on ProjectV2 {
+                    items(first: 100) {
+                      nodes {
+                        id
+                        content {
+                          __typename
+                          ... on DraftIssue { title }
+                          ... on Issue { title }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            `, { projectId });
+
+            const nodes = findItemResp?.node?.items?.nodes ?? [];
+            const norm = (s) => (s || "").trim().toLowerCase();
+
+            const item = nodes.find(n => norm(n?.content?.title) === norm(envName));
+            if (!item) {
+              const titles = nodes.map(n => n?.content?.title).filter(Boolean);
+              throw new Error(
+                `Could not find a Project row with title "${envName}".\n` +
+                `Available titles (first 100): ${titles.join(", ")}`
+              );
+            }
+
+            const itemId = item.id;
+            const owner = context.actor; // <-- automatically the user who ran the workflow
+
+            // ---- Helper: update field value ----
+            async function updateSingleSelect(fieldId, optionId) {
+              await github.graphql(`
+                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                  updateProjectV2ItemFieldValue(
+                    input: {
+                      projectId: $projectId,
+                      itemId: $itemId,
+                      fieldId: $fieldId,
+                      value: { singleSelectOptionId: $optionId }
+                    }
+                  ) { projectV2Item { id } }
+                }
+              `, { projectId, itemId, fieldId, optionId });
+            }
+
+            async function updateText(fieldId, text) {
+              await github.graphql(`
+                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $text: String!) {
+                  updateProjectV2ItemFieldValue(
+                    input: {
+                      projectId: $projectId,
+                      itemId: $itemId,
+                      fieldId: $fieldId,
+                      value: { text: $text }
+                    }
+                  ) { projectV2Item { id } }
+                }
+              `, { projectId, itemId, fieldId, text });
+            }
+
+            async function updateDate(fieldId, dateIso) {
+              await github.graphql(`
+                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $date: Date!) {
+                  updateProjectV2ItemFieldValue(
+                    input: {
+                      projectId: $projectId,
+                      itemId: $itemId,
+                      fieldId: $fieldId,
+                      value: { date: $date }
+                    }
+                  ) { projectV2Item { id } }
+                }
+              `, { projectId, itemId, fieldId, date: dateIso });
+            }
+
+            // ---- 2) Update the Project table fields ----
+            // Status -> In Use
+            await updateSingleSelect(statusFieldId, inUseOptionId);
+
+            // Owner -> workflow runner
+            await updateText(ownerFieldId, owner);
+
+            // Purpose -> input
+            await updateText(purposeFieldId, purpose);
+
+            // Expires At -> now + ttl_hours
+            await updateDate(expiresFieldId, expiresAt);
+
+            core.notice(
+              `Locked ${envName} (itemId=${itemId}) as "In Use" by ${owner} for ${ttlHours}h. Expires: ${expiresAt}`
+            );
+          env_name: ${{ inputs.env_name }}
+          ttl_hours: ${{ inputs.ttl_hours }}
+          purpose: ${{ inputs.purpose }}
