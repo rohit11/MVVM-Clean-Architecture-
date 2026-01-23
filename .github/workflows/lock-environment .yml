@@ -132,9 +132,9 @@ jobs:
 
             core.notice(`Locked ${envName} by ${owner} for ${ttlHours}h. Expires: ${expiresAt}`);
         env:
-          PROJECT_ID: ${{ vars.PROJECT_ID }}
-          STATUS_FIELD_ID: ${{ vars.STATUS_FIELD_ID }}
-          STATUS_INUSE_OPTION_ID: ${{ vars.STATUS_INUSE_OPTION_ID }}
-          OWNER_FIELD_ID: ${{ vars.OWNER_FIELD_ID }}
-          PURPOSE_FIELD_ID: ${{ vars.PURPOSE_FIELD_ID }}
-          EXPIRES_FIELD_ID: ${{ vars.EXPIRES_FIELD_ID }}
+          PROJECT_ID: ${{ secrets.PROJECT_ID }}
+          STATUS_FIELD_ID: ${{ secrets.STATUS_FIELD_ID }}
+          STATUS_INUSE_OPTION_ID: ${{ secrets.STATUS_INUSE_OPTION_ID }}
+          OWNER_FIELD_ID: ${{ secrets.OWNER_FIELD_ID }}
+          PURPOSE_FIELD_ID: ${{ secrets.PURPOSE_FIELD_ID }}
+          EXPIRES_FIELD_ID: ${{ secrets.EXPIRES_FIELD_ID }}
