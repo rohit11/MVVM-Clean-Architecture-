@@ -68,7 +68,7 @@ jobs:
               const dispatchInputs = context.payload.inputs || {};
               const envName = String(dispatchInputs.env_name || "").trim();
               const purpose = String(dispatchInputs.purpose || "").trim();
-              const ttlHoursRaw = String(dispatchInputs.ttl_hours || "").trim();
+              const ttlHours = String(dispatchInputs.ttl_hours || "").trim();
 
               if (!Number.isFinite(ttlHours) || ttlHours <= 0) {
                 throw new Error(`Invalid ttl_hours="${ttlHoursRaw}". Must be a positive number.`);
