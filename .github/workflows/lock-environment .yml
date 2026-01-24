@@ -65,10 +65,10 @@ jobs:
 
             async function main() {
               // ---- Inputs ----
-              const envName = core.getInput('env_name').trim();
-              const purpose = core.getInput('purpose').trim();
-              const ttlHoursRaw = core.getInput('ttl_hours').trim();
-              const ttlHours = Number(ttlHoursRaw);
+              const dispatchInputs = context.payload.inputs || {};
+              const envName = String(dispatchInputs.env_name || "").trim();
+              const purpose = String(dispatchInputs.purpose || "").trim();
+              const ttlHoursRaw = String(dispatchInputs.ttl_hours || "").trim();
 
               if (!Number.isFinite(ttlHours) || ttlHours <= 0) {
                 throw new Error(`Invalid ttl_hours="${ttlHoursRaw}". Must be a positive number.`);
