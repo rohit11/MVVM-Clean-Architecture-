@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       env_name:
-        description: "Environment row title in the Project (e.g., env-01, env-12)"
+        description: "Environment row title in the Project (e.g., env1, env12)"
         required: true
         type: string
       ttl_hours:
-        description: "How many hours to lock this env"
+        description: "How many hours to lock this env (used only when acquiring a NEW lock, or when extending explicitly)"
         required: true
         default: "8"
         type: string
@@ -17,7 +17,6 @@ on:
         required: true
         type: string
 
-# Keep minimal permissions; we will use PROJECTS_TOKEN for GraphQL
 permissions:
   contents: read
 
@@ -25,116 +24,321 @@ jobs:
   lock:
     runs-on: ubuntu-latest
     steps:
-      - name: Lock env row in Project (Status/Owner/Purpose/Expires At)
+      - name: Lock env row in Project (no auto-extend; Blocked-safe)
+        id: lock_env
         uses: actions/github-script@v7
+        env:
+          # ---- Repo Variables (Settings -> Secrets and variables -> Actions -> Variables) ----
+          PROJECT_ID: ${{ vars.PROJECT_ID }}
+
+          STATUS_FIELD_ID: ${{ vars.STATUS_FIELD_ID }}
+          STATUS_AVAILABLE_OPTION_ID: ${{ vars.STATUS_AVAILABLE_OPTION_ID }}
+          STATUS_INUSE_OPTION_ID: ${{ vars.STATUS_INUSE_OPTION_ID }}
+          STATUS_BLOCKED_OPTION_ID: ${{ vars.STATUS_BLOCKED_OPTION_ID }}
+
+          OWNER_FIELD_ID: ${{ vars.OWNER_FIELD_ID }}
+          PURPOSE_FIELD_ID: ${{ vars.PURPOSE_FIELD_ID }}
+
+          EXPIRES_DATE_FIELD_ID: ${{ vars.EXPIRES_FIELD_ID }}     # Date field (UI)
+          EXPIRES_UTC_FIELD_ID: ${{ vars.EXPIRES_UTC_FIELD_ID }}  # Text field (accurate TTL; recommended)
         with:
           github-token: ${{ secrets.PROJECTS_TOKEN }}
-          env_name: ${{ inputs.env_name }}
-          ttl_hours: ${{ inputs.ttl_hours }}
-          purpose: ${{ inputs.purpose }}
           script: |
-            const envName = core.getInput('env_name').trim();
-            const ttlHoursRaw = core.getInput('ttl_hours').trim();
-            const purpose = core.getInput('purpose').trim();
+            /**
+             * BUSINESS LOGIC (Lock)
+             * ---------------------
+             * Goal: Acquire an env lock safely without letting repeated runs extend the lock forever.
+             *
+             * Rule set:
+             * 1) Always read current state first (Status/Owner/Expiry).
+             * 2) If Status == BLOCKED => FAIL (never lock).
+             * 3) If Status == IN USE AND not expired:
+             *      - If same owner => SUCCESS (do NOT change expiry). Optional: update Purpose only.
+             *      - If different owner => FAIL (do not overwrite).
+             * 4) If Status == AVAILABLE OR expired => acquire a NEW lock:
+             *      - Status = IN USE
+             *      - Owner = context.actor (who ran workflow)
+             *      - Purpose = input
+             *      - Expires (Date) = YYYY-MM-DD (UI)
+             *      - Expires UTC (Text) = ISO timestamp (accurate TTL; recommended)
+             */
 
-            const ttlHours = Number(ttlHoursRaw);
-            if (!Number.isFinite(ttlHours) || ttlHours <= 0) {
-              throw new Error(`ttl_hours must be a positive number. Got: "${ttlHoursRaw}"`);
-            }
+            async function main() {
+              // ---- Inputs ----
+              const envName = core.getInput('env_name').trim();
+              const purpose = core.getInput('purpose').trim();
+              const ttlHoursRaw = core.getInput('ttl_hours').trim();
+              const ttlHours = Number(ttlHoursRaw);
 
-            const expiresAt = new Date(Date.now() + ttlHours * 60 * 60 * 1000).toISOString();
+              if (!Number.isFinite(ttlHours) || ttlHours <= 0) {
+                throw new Error(`Invalid ttl_hours="${ttlHoursRaw}". Must be a positive number.`);
+              }
 
-            // IDs stored as repo variables
-            const projectId = process.env.PROJECT_ID;
-            const statusFieldId = process.env.STATUS_FIELD_ID;
-            const inUseOptionId = process.env.STATUS_INUSE_OPTION_ID;
-            const ownerFieldId = process.env.OWNER_FIELD_ID;
-            const purposeFieldId = process.env.PURPOSE_FIELD_ID;
-            const expiresFieldId = process.env.EXPIRES_FIELD_ID;
+              // ---- Config/IDs ----
+              const projectId = process.env.PROJECT_ID;
+              const statusFieldId = process.env.STATUS_FIELD_ID;
 
-            for (const [k,v] of Object.entries({
-              PROJECT_ID: projectId,
-              STATUS_FIELD_ID: statusFieldId,
-              STATUS_INUSE_OPTION_ID: inUseOptionId,
-              OWNER_FIELD_ID: ownerFieldId,
-              PURPOSE_FIELD_ID: purposeFieldId,
-              EXPIRES_FIELD_ID: expiresFieldId
-            })) {
-              if (!v) throw new Error(`Missing repo variable: ${k}`);
-            }
+              const optAvailable = process.env.STATUS_AVAILABLE_OPTION_ID;
+              const optInUse = process.env.STATUS_INUSE_OPTION_ID;
+              const optBlocked = (process.env.STATUS_BLOCKED_OPTION_ID || "").trim();
 
-            // Find itemId by title (Pattern 1)
-            const findItemResp = await github.graphql(`
-              query($projectId: ID!) {
-                node(id: $projectId) {
-                  ... on ProjectV2 {
-                    items(first: 100) {
-                      nodes {
-                        id
-                        content {
-                          __typename
-                          ... on DraftIssue { title }
-                          ... on Issue { title }
+              const ownerFieldId = process.env.OWNER_FIELD_ID;
+              const purposeFieldId = process.env.PURPOSE_FIELD_ID;
+
+              const expiresDateFieldId = process.env.EXPIRES_DATE_FIELD_ID;
+              const expiresUtcFieldId = (process.env.EXPIRES_UTC_FIELD_ID || "").trim(); // optional but recommended
+
+              const required = {
+                PROJECT_ID: projectId,
+                STATUS_FIELD_ID: statusFieldId,
+                STATUS_AVAILABLE_OPTION_ID: optAvailable,
+                STATUS_INUSE_OPTION_ID: optInUse,
+                OWNER_FIELD_ID: ownerFieldId,
+                PURPOSE_FIELD_ID: purposeFieldId,
+                EXPIRES_DATE_FIELD_ID: expiresDateFieldId
+              };
+              for (const [k, v] of Object.entries(required)) {
+                if (!v) throw new Error(`Missing repo variable: ${k}`);
+              }
+
+              const actor = context.actor;
+              const now = new Date();
+
+              // ---- Compute NEW expiry (used only when acquiring a new lock) ----
+              const newExpiresAtIso = new Date(now.getTime() + ttlHours * 60 * 60 * 1000).toISOString();
+              const newExpiresAtDateOnly = newExpiresAtIso.slice(0, 10); // YYYY-MM-DD
+
+              // ---- Fetch project items and field values ----
+              const proj = await github.graphql(`
+                query($projectId: ID!) {
+                  node(id: $projectId) {
+                    ... on ProjectV2 {
+                      items(first: 100) {
+                        nodes {
+                          id
+                          content {
+                            __typename
+                            ... on DraftIssue { title }
+                            ... on Issue { title }
+                          }
+                          fieldValues(first: 50) {
+                            nodes {
+                              __typename
+                              ... on ProjectV2ItemFieldTextValue {
+                                text
+                                field { ... on ProjectV2FieldCommon { id name } }
+                              }
+                              ... on ProjectV2ItemFieldDateValue {
+                                date
+                                field { ... on ProjectV2FieldCommon { id name } }
+                              }
+                              ... on ProjectV2ItemFieldSingleSelectValue {
+                                name
+                                optionId
+                                field { ... on ProjectV2FieldCommon { id name } }
+                              }
+                            }
+                          }
                         }
                       }
                     }
                   }
                 }
+              `, { projectId });
+
+              const items = proj?.node?.items?.nodes ?? [];
+              const norm = (s) => (s || "").trim().toLowerCase();
+
+              const item = items.find(i => norm(i?.content?.title) === norm(envName));
+              if (!item) {
+                throw new Error(`Env row "${envName}" not found in Project (first 100 items).`);
               }
-            `, { projectId });
 
-            const nodes = findItemResp?.node?.items?.nodes ?? [];
-            const norm = (s) => (s || "").trim().toLowerCase();
-            const item = nodes.find(n => norm(n?.content?.title) === norm(envName));
+              const itemId = item.id;
 
-            if (!item) {
-              const titles = nodes.map(n => n?.content?.title).filter(Boolean);
-              throw new Error(`Row "${envName}" not found. Titles: ${titles.join(", ")}`);
-            }
+              // ---- Read helpers ----
+              function getSingleSelect(fieldId) {
+                const v = item.fieldValues.nodes.find(
+                  n => n.__typename === "ProjectV2ItemFieldSingleSelectValue" && n.field?.id === fieldId
+                );
+                return v ? { name: v.name, optionId: v.optionId } : null;
+              }
+              function getText(fieldId) {
+                const v = item.fieldValues.nodes.find(
+                  n => n.__typename === "ProjectV2ItemFieldTextValue" && n.field?.id === fieldId
+                );
+                return v ? v.text : "";
+              }
+              function getDate(fieldId) {
+                const v = item.fieldValues.nodes.find(
+                  n => n.__typename === "ProjectV2ItemFieldDateValue" && n.field?.id === fieldId
+                );
+                return v ? v.date : "";
+              }
 
-            const itemId = item.id;
-            const owner = context.actor; // <-- who ran the workflow
+              const curStatus = getSingleSelect(statusFieldId);
+              const curOwner = getText(ownerFieldId);
+              const curExpiresUtc = expiresUtcFieldId ? getText(expiresUtcFieldId) : "";
+              const curExpiresDate = getDate(expiresDateFieldId);
 
-            async function updateSingleSelect(fieldId, optionId) {
-              await github.graphql(`
-                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
-                  updateProjectV2ItemFieldValue(
-                    input: { projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: { singleSelectOptionId: $optionId } }
-                  ) { projectV2Item { id } }
+              // ---- Determine expiry ----
+              let curExpiryMs = 0;
+              if (curExpiresUtc) {
+                const parsed = Date.parse(curExpiresUtc);
+                curExpiryMs = Number.isFinite(parsed) ? parsed : 0;
+              } else if (curExpiresDate) {
+                const parsed = Date.parse(curExpiresDate + "T23:59:59Z");
+                curExpiryMs = Number.isFinite(parsed) ? parsed : 0;
+              }
+
+              const isExpired = curExpiryMs > 0 && curExpiryMs <= now.getTime();
+              const curStatusName = (curStatus?.name || "").trim().toLowerCase();
+
+              const isInUse =
+                (curStatus?.optionId === optInUse) ||
+                (curStatusName === "in use");
+
+              const isBlocked =
+                (optBlocked && curStatus?.optionId === optBlocked) ||
+                (curStatusName === "blocked");
+
+              const isAvailable =
+                (curStatus?.optionId === optAvailable) ||
+                (curStatusName === "available") ||
+                (!curStatus); // treat empty status as available-ish
+
+              core.notice(`Matched "${envName}" itemId=${itemId}`);
+              core.notice(`Current status="${curStatus?.name || "n/a"}" owner="${curOwner}" expiresUtc="${curExpiresUtc}" expiresDate="${curExpiresDate}" expired=${isExpired}`);
+
+              // ---- BLOCKED rule ----
+              if (isBlocked) {
+                throw new Error(`Env "${envName}" is BLOCKED and cannot be locked.`);
+              }
+
+              // ---- Helper mutations ----
+              async function setSingleSelect(fieldId, optionId) {
+                await github.graphql(`
+                  mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                    updateProjectV2ItemFieldValue(
+                      input: {
+                        projectId: $projectId,
+                        itemId: $itemId,
+                        fieldId: $fieldId,
+                        value: { singleSelectOptionId: $optionId }
+                      }
+                    ) { projectV2Item { id } }
+                  }
+                `, { projectId, itemId, fieldId, optionId });
+              }
+              async function setText(fieldId, text) {
+                await github.graphql(`
+                  mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $text: String!) {
+                    updateProjectV2ItemFieldValue(
+                      input: {
+                        projectId: $projectId,
+                        itemId: $itemId,
+                        fieldId: $fieldId,
+                        value: { text: $text }
+                      }
+                    ) { projectV2Item { id } }
+                  }
+                `, { projectId, itemId, fieldId, text });
+              }
+              async function setDate(fieldId, dateStr) {
+                await github.graphql(`
+                  mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $date: Date!) {
+                    updateProjectV2ItemFieldValue(
+                      input: {
+                        projectId: $projectId,
+                        itemId: $itemId,
+                        fieldId: $fieldId,
+                        value: { date: $date }
+                      }
+                    ) { projectV2Item { id } }
+                  }
+                `, { projectId, itemId, fieldId, date: dateStr });
+              }
+
+              // ---- IN USE + NOT EXPIRED rule (no auto-extend) ----
+              if (isInUse && !isExpired) {
+                if (curOwner && curOwner.toLowerCase() === actor.toLowerCase()) {
+                  // Same owner: allow "re-lock" but DO NOT change expiry.
+                  // Optional: update purpose to latest reason.
+                  await setText(purposeFieldId, purpose);
+
+                  core.setOutput("ok", "true");
+                  core.setOutput("action", "noop_same_owner");
+                  core.setOutput("message", `Env "${envName}" is already locked by you. Keeping existing expiry (no auto-extend).`);
+                  core.notice(`No-op (same owner). Kept existing expiry: ${curExpiresUtc || curExpiresDate || "unknown"}`);
+                  return;
+                } else {
+                  // Different owner: do not overwrite
+                  throw new Error(`Env "${envName}" is already In Use by "${curOwner}". Expires: ${curExpiresUtc || curExpiresDate || "unknown"}.`);
                 }
-              `, { projectId, itemId, fieldId, optionId });
-            }
+              }
 
-            async function updateText(fieldId, text) {
-              await github.graphql(`
-                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $text: String!) {
-                  updateProjectV2ItemFieldValue(
-                    input: { projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: { text: $text } }
-                  ) { projectV2Item { id } }
+              // ---- AVAILABLE or EXPIRED => acquire NEW lock ----
+              // If it was expired but still marked In Use, we treat that as releasable and then relock.
+              if (isAvailable || isExpired || isInUse) {
+                await setSingleSelect(statusFieldId, optInUse);
+                await setText(ownerFieldId, actor);
+                await setText(purposeFieldId, purpose);
+                await setDate(expiresDateFieldId, newExpiresAtDateOnly);
+
+                if (expiresUtcFieldId) {
+                  await setText(expiresUtcFieldId, newExpiresAtIso);
                 }
-              `, { projectId, itemId, fieldId, text });
+
+                core.setOutput("ok", "true");
+                core.setOutput("action", "locked");
+                core.setOutput("message", `Locked "${envName}" by ${actor} for ${ttlHours}h.`);
+                core.notice(`Locked "${envName}" by ${actor} for ${ttlHours}h. ExpiresUTC=${newExpiresAtIso}`);
+                return;
+              }
+
+              // Fallback (should not hit)
+              throw new Error(`Unexpected state for "${envName}". Status="${curStatus?.name || "n/a"}".`);
             }
 
-            async function updateDate(fieldId, dateIso) {
-              await github.graphql(`
-                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $date: Date!) {
-                  updateProjectV2ItemFieldValue(
-                    input: { projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: { date: $date } }
-                  ) { projectV2Item { id } }
-                }
-              `, { projectId, itemId, fieldId, date: dateIso });
+            // Capture failures as outputs so email step can include reason
+            try {
+              await main();
+            } catch (err) {
+              const msg = (err && err.message) ? err.message : String(err);
+              core.setOutput("ok", "false");
+              core.setOutput("action", "failed");
+              core.setOutput("message", msg);
+              core.warning(`Lock failed: ${msg}`);
             }
 
-            await updateSingleSelect(statusFieldId, inUseOptionId);
-            await updateText(ownerFieldId, owner);
-            await updateText(purposeFieldId, purpose);
-            await updateDate(expiresFieldId, expiresAt);
+      - name: Email team channel on failure
+        if: steps.lock_env.outputs.ok == 'false'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_HOST }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          secure: false
+          to: ${{ secrets.ALERT_TO_EMAIL }}
+          from: ${{ secrets.ALERT_FROM_EMAIL }}
+          subject: "❌ Env lock FAILED: ${{ inputs.env_name }} (by ${{ github.actor }})"
+          body: |
+            Env lock workflow FAILED.
 
-            core.notice(`Locked ${envName} by ${owner} for ${ttlHours}h. Expires: ${expiresAt}`);
-        env:
-          PROJECT_ID: ${{ secrets.PROJECT_ID }}
-          STATUS_FIELD_ID: ${{ secrets.STATUS_FIELD_ID }}
-          STATUS_INUSE_OPTION_ID: ${{ secrets.STATUS_INUSE_OPTION_ID }}
-          OWNER_FIELD_ID: ${{ secrets.OWNER_FIELD_ID }}
-          PURPOSE_FIELD_ID: ${{ secrets.PURPOSE_FIELD_ID }}
-          EXPIRES_FIELD_ID: ${{ secrets.EXPIRES_FIELD_ID }}
+            Env:        ${{ inputs.env_name }}
+            Actor:      ${{ github.actor }}
+            Purpose:    ${{ inputs.purpose }}
+            TTL Hours:  ${{ inputs.ttl_hours }}
+
+            Reason:
+            ${{ steps.lock_env.outputs.message }}
+
+            Repo: ${{ github.repository }}
+            Run:  ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+      - name: Fail job (after emailing)
+        if: steps.lock_env.outputs.ok == 'false'
+        run: |
+          echo "Lock failed: ${{ steps.lock_env.outputs.message }}"
+          exit 1
