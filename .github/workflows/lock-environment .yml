@@ -71,7 +71,7 @@ jobs:
               const ttlHours = String(dispatchInputs.ttl_hours || "").trim();
 
               if (!Number.isFinite(ttlHours) || ttlHours <= 0) {
-                throw new Error(`Invalid ttl_hours="${ttlHoursRaw}". Must be a positive number.`);
+                throw new Error(`Invalid ttl_hours="${ttlHours}". Must be a positive number.`);
               }
 
               // ---- Config/IDs ----
