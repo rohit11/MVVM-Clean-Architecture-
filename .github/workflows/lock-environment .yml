@@ -311,32 +311,6 @@ jobs:
               core.warning(`Lock failed: ${msg}`);
             }
 
-      - name: Email team channel on failure
-        if: steps.lock_env.outputs.ok == 'false'
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: ${{ secrets.SMTP_HOST }}
-          server_port: ${{ secrets.SMTP_PORT }}
-          username: ${{ secrets.SMTP_USERNAME }}
-          password: ${{ secrets.SMTP_PASSWORD }}
-          secure: false
-          to: ${{ secrets.ALERT_TO_EMAIL }}
-          from: ${{ secrets.ALERT_FROM_EMAIL }}
-          subject: "❌ Env lock FAILED: ${{ inputs.env_name }} (by ${{ github.actor }})"
-          body: |
-            Env lock workflow FAILED.
-
-            Env:        ${{ inputs.env_name }}
-            Actor:      ${{ github.actor }}
-            Purpose:    ${{ inputs.purpose }}
-            TTL Hours:  ${{ inputs.ttl_hours }}
-
-            Reason:
-            ${{ steps.lock_env.outputs.message }}
-
-            Repo: ${{ github.repository }}
-            Run:  ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
       - name: Fail job (after emailing)
         if: steps.lock_env.outputs.ok == 'false'
         run: |
