@@ -39,7 +39,7 @@ jobs:
           OWNER_FIELD_ID: ${{ vars.OWNER_FIELD_ID }}
           PURPOSE_FIELD_ID: ${{ vars.PURPOSE_FIELD_ID }}
 
-          EXPIRES_DATE_FIELD_ID: ${{ vars.EXPIRES_FIELD_ID }}     # Date field (UI)
+          EXPIRES_DATE_FIELD_ID: ${{ vars.EXPIRES_DATE_FIELD_ID }}     # Date field (UI)
           EXPIRES_UTC_FIELD_ID: ${{ vars.EXPIRES_UTC_FIELD_ID }}  # Text field (accurate TTL; recommended)
         with:
           github-token: ${{ secrets.PROJECTS_TOKEN }}
