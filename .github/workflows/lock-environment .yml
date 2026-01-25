@@ -68,11 +68,17 @@ jobs:
               const dispatchInputs = context.payload.inputs || {};
               const envName = String(dispatchInputs.env_name || "").trim();
               const purpose = String(dispatchInputs.purpose || "").trim();
-            const ttlHoursRaw = String(dispatchInputs.ttl_hours || "").trim();
-            const ttlHours = Number(ttlHoursRaw);
+              const ttlHoursRaw = String(dispatchInputs.ttl_hours || "").trim();
+              const ttlHours = Number(ttlHoursRaw);
 
-            if (!Number.isFinite(ttlHours) || ttlHours <= 0) {
-              throw new Error(`Invalid ttl_hours="${ttlHoursRaw}". Must be a positive number.`);
+              if (!envName) {
+                throw new Error("Invalid env_name: value is required.");
+              }
+              if (!purpose) {
+                throw new Error("Invalid purpose: value is required.");
+              }
+              if (!Number.isFinite(ttlHours) || ttlHours <= 0) {
+                throw new Error(`Invalid ttl_hours="${ttlHoursRaw}". Must be a positive number.`);
               }
 
               // ---- Config/IDs ----
@@ -110,33 +116,59 @@ jobs:
               const newExpiresAtDateOnly = newExpiresAtIso.slice(0, 10); // YYYY-MM-DD
 
               // ---- Fetch project items and field values ----
-              const proj = await github.graphql(`
-                query($projectId: ID!) {
-                  node(id: $projectId) {
-                    ... on ProjectV2 {
-                      items(first: 100) {
-                        nodes {
-                          id
-                          content {
-                            __typename
-                            ... on DraftIssue { title }
-                            ... on Issue { title }
-                          }
-                          fieldValues(first: 50) {
-                            nodes {
+              let item = null;
+              let cursor = null;
+              let page = 0;
+              const maxPages = 20; // safety cap: 100 * 20 = 2000 items
+
+              const norm = (s) => (s || "").trim().toLowerCase();
+              const targetName = norm(envName);
+              const getItemTitle = (i) => {
+                const contentTitle = i?.content?.title;
+                if (contentTitle) return contentTitle;
+                const titleField = (i?.fieldValues?.nodes || []).find(
+                  n => n.__typename === "ProjectV2ItemFieldTextValue" &&
+                    norm(n.field?.name) === "title"
+                );
+                return titleField?.text || "";
+              };
+
+              while (!item) {
+                page += 1;
+                if (page > maxPages) {
+                  throw new Error(`Env row "${envName}" not found after ${maxPages} pages. Increase maxPages or reduce project size.`);
+                }
+
+                const proj = await github.graphql(`
+                  query($projectId: ID!, $after: String) {
+                    node(id: $projectId) {
+                      ... on ProjectV2 {
+                        items(first: 100, after: $after) {
+                          pageInfo { hasNextPage endCursor }
+                          nodes {
+                            id
+                            content {
                               __typename
-                              ... on ProjectV2ItemFieldTextValue {
-                                text
-                                field { ... on ProjectV2FieldCommon { id name } }
-                              }
-                              ... on ProjectV2ItemFieldDateValue {
-                                date
-                                field { ... on ProjectV2FieldCommon { id name } }
-                              }
-                              ... on ProjectV2ItemFieldSingleSelectValue {
-                                name
-                                optionId
-                                field { ... on ProjectV2FieldCommon { id name } }
+                              ... on DraftIssue { title }
+                              ... on Issue { title }
+                              ... on PullRequest { title }
+                            }
+                            fieldValues(first: 50) {
+                              nodes {
+                                __typename
+                                ... on ProjectV2ItemFieldTextValue {
+                                  text
+                                  field { ... on ProjectV2FieldCommon { id name } }
+                                }
+                                ... on ProjectV2ItemFieldDateValue {
+                                  date
+                                  field { ... on ProjectV2FieldCommon { id name } }
+                                }
+                                ... on ProjectV2ItemFieldSingleSelectValue {
+                                  name
+                                  optionId
+                                  field { ... on ProjectV2FieldCommon { id name } }
+                                }
                               }
                             }
                           }
@@ -144,15 +176,20 @@ jobs:
                       }
                     }
                   }
+                `, { projectId, after: cursor });
+
+                const items = proj?.node?.items?.nodes ?? [];
+                item = items.find(i => norm(getItemTitle(i)) === targetName);
+
+                const pageInfo = proj?.node?.items?.pageInfo;
+                if (!pageInfo?.hasNextPage) {
+                  break;
                 }
-              `, { projectId });
+                cursor = pageInfo.endCursor;
+              }
 
-              const items = proj?.node?.items?.nodes ?? [];
-              const norm = (s) => (s || "").trim().toLowerCase();
-
-              const item = items.find(i => norm(i?.content?.title) === norm(envName));
               if (!item) {
-                throw new Error(`Env row "${envName}" not found in Project (first 100 items).`);
+                throw new Error(`Env row "${envName}" not found in Project.`);
               }
 
               const itemId = item.id;
