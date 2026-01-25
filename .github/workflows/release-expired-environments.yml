@@ -1,0 +1,275 @@
+name: Release Expired Environments (Project Board)
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+    inputs:
+      env_name:
+        description: "Env row title to check (default: all)"
+        required: false
+        default: "all"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Release expired envs in Project
+        uses: actions/github-script@v7
+        env:
+          # ---- Repo Variables (Settings -> Secrets and variables -> Actions -> Variables) ----
+          PROJECT_ID: ${{ vars.PROJECT_ID }}
+
+          STATUS_FIELD_ID: ${{ vars.STATUS_FIELD_ID }}
+          STATUS_AVAILABLE_OPTION_ID: ${{ vars.STATUS_AVAILABLE_OPTION_ID }}
+          STATUS_INUSE_OPTION_ID: ${{ vars.STATUS_INUSE_OPTION_ID }}
+          STATUS_BLOCKED_OPTION_ID: ${{ vars.STATUS_BLOCKED_OPTION_ID }}
+
+          OWNER_FIELD_ID: ${{ vars.OWNER_FIELD_ID }}
+          PURPOSE_FIELD_ID: ${{ vars.PURPOSE_FIELD_ID }}
+          BRANCH_FIELD_ID: ${{ vars.BRANCH_FIELD_ID }}
+
+          EXPIRES_DATE_FIELD_ID: ${{ vars.EXPIRES_DATE_FIELD_ID }}     # Date field (UI)
+          EXPIRES_UTC_FIELD_ID: ${{ vars.EXPIRES_UTC_FIELD_ID }}  # Text field (accurate TTL; recommended)
+        with:
+          github-token: ${{ secrets.PROJECTS_TOKEN }}
+          script: |
+            /**
+             * BUSINESS LOGIC (Release expired)
+             * --------------------------------
+             * - Only act on items with Status == IN USE.
+             * - If expired (UTC preferred), set Status = AVAILABLE and clear other fields.
+             * - Skip BLOCKED and AVAILABLE items.
+             * - Manual run can target one env; schedule always checks all.
+             */
+
+            async function main() {
+              // ---- Inputs ----
+              const dispatchInputs = context.payload.inputs || {};
+              const rawEnvName = String(dispatchInputs.env_name || "all").trim();
+              const targetAll = rawEnvName.length === 0 || rawEnvName.toLowerCase() === "all";
+
+              // ---- Config/IDs ----
+              const projectId = process.env.PROJECT_ID;
+              const statusFieldId = process.env.STATUS_FIELD_ID;
+              const optAvailable = process.env.STATUS_AVAILABLE_OPTION_ID;
+              const optInUse = process.env.STATUS_INUSE_OPTION_ID;
+              const optBlocked = (process.env.STATUS_BLOCKED_OPTION_ID || "").trim();
+
+              const ownerFieldId = process.env.OWNER_FIELD_ID;
+              const purposeFieldId = process.env.PURPOSE_FIELD_ID;
+              const branchFieldId = (process.env.BRANCH_FIELD_ID || "").trim();
+
+              const expiresDateFieldId = process.env.EXPIRES_DATE_FIELD_ID;
+              const expiresUtcFieldId = (process.env.EXPIRES_UTC_FIELD_ID || "").trim();
+
+              const required = {
+                PROJECT_ID: projectId,
+                STATUS_FIELD_ID: statusFieldId,
+                STATUS_AVAILABLE_OPTION_ID: optAvailable,
+                STATUS_INUSE_OPTION_ID: optInUse,
+                OWNER_FIELD_ID: ownerFieldId,
+                PURPOSE_FIELD_ID: purposeFieldId,
+                EXPIRES_DATE_FIELD_ID: expiresDateFieldId
+              };
+              for (const [k, v] of Object.entries(required)) {
+                if (!v) throw new Error(`Missing repo variable: ${k}`);
+              }
+
+              const norm = (s) => (s || "").trim().toLowerCase();
+              const targetName = norm(rawEnvName);
+              const now = new Date();
+
+              // ---- Fetch project items and field values ----
+              let cursor = null;
+              let page = 0;
+              const maxPages = 20; // safety cap: 100 * 20 = 2000 items
+
+              const getItemTitle = (i) => {
+                const contentTitle = i?.content?.title;
+                if (contentTitle) return contentTitle;
+                const titleField = (i?.fieldValues?.nodes || []).find(
+                  n => n.__typename === "ProjectV2ItemFieldTextValue" &&
+                    norm(n.field?.name) === "title"
+                );
+                return titleField?.text || "";
+              };
+
+              function getSingleSelect(item, fieldId) {
+                const v = item.fieldValues.nodes.find(
+                  n => n.__typename === "ProjectV2ItemFieldSingleSelectValue" && n.field?.id === fieldId
+                );
+                return v ? { name: v.name, optionId: v.optionId } : null;
+              }
+              function getText(item, fieldId) {
+                const v = item.fieldValues.nodes.find(
+                  n => n.__typename === "ProjectV2ItemFieldTextValue" && n.field?.id === fieldId
+                );
+                return v ? v.text : "";
+              }
+              function getDate(item, fieldId) {
+                const v = item.fieldValues.nodes.find(
+                  n => n.__typename === "ProjectV2ItemFieldDateValue" && n.field?.id === fieldId
+                );
+                return v ? v.date : "";
+              }
+
+              async function setSingleSelect(itemId, fieldId, optionId) {
+                await github.graphql(`
+                  mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                    updateProjectV2ItemFieldValue(
+                      input: {
+                        projectId: $projectId,
+                        itemId: $itemId,
+                        fieldId: $fieldId,
+                        value: { singleSelectOptionId: $optionId }
+                      }
+                    ) { projectV2Item { id } }
+                  }
+                `, { projectId, itemId, fieldId, optionId });
+              }
+              async function clearField(itemId, fieldId) {
+                if (!fieldId) return;
+                await github.graphql(`
+                  mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!) {
+                    clearProjectV2ItemFieldValue(
+                      input: {
+                        projectId: $projectId,
+                        itemId: $itemId,
+                        fieldId: $fieldId
+                      }
+                    ) { projectV2Item { id } }
+                  }
+                `, { projectId, itemId, fieldId });
+              }
+
+              let scanned = 0;
+              let released = 0;
+              let matched = 0;
+
+              while (true) {
+                page += 1;
+                if (page > maxPages) {
+                  throw new Error(`Safety stop after ${maxPages} pages. Increase maxPages or reduce project size.`);
+                }
+
+                const proj = await github.graphql(`
+                  query($projectId: ID!, $after: String) {
+                    node(id: $projectId) {
+                      ... on ProjectV2 {
+                        items(first: 100, after: $after) {
+                          pageInfo { hasNextPage endCursor }
+                          nodes {
+                            id
+                            content {
+                              __typename
+                              ... on DraftIssue { title }
+                              ... on Issue { title }
+                              ... on PullRequest { title }
+                            }
+                            fieldValues(first: 50) {
+                              nodes {
+                                __typename
+                                ... on ProjectV2ItemFieldTextValue {
+                                  text
+                                  field { ... on ProjectV2FieldCommon { id name } }
+                                }
+                                ... on ProjectV2ItemFieldDateValue {
+                                  date
+                                  field { ... on ProjectV2FieldCommon { id name } }
+                                }
+                                ... on ProjectV2ItemFieldSingleSelectValue {
+                                  name
+                                  optionId
+                                  field { ... on ProjectV2FieldCommon { id name } }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                `, { projectId, after: cursor });
+
+                const items = proj?.node?.items?.nodes ?? [];
+                for (const item of items) {
+                  scanned += 1;
+                  const name = getItemTitle(item);
+                  if (!targetAll && norm(name) !== targetName) {
+                    continue;
+                  }
+                  matched += 1;
+
+                  const curStatus = getSingleSelect(item, statusFieldId);
+                  const curStatusName = (curStatus?.name || "").trim().toLowerCase();
+
+                  const isInUse =
+                    (curStatus?.optionId === optInUse) ||
+                    (curStatusName === "in use");
+
+                  const isBlocked =
+                    (optBlocked && curStatus?.optionId === optBlocked) ||
+                    (curStatusName === "blocked");
+
+                  const isAvailable =
+                    (curStatus?.optionId === optAvailable) ||
+                    (curStatusName === "available") ||
+                    (!curStatus);
+
+                  if (!isInUse || isBlocked || isAvailable) {
+                    continue;
+                  }
+
+                  const curExpiresUtc = expiresUtcFieldId ? getText(item, expiresUtcFieldId) : "";
+                  const curExpiresDate = getDate(item, expiresDateFieldId);
+
+                  let curExpiryMs = 0;
+                  if (curExpiresUtc) {
+                    const parsed = Date.parse(curExpiresUtc);
+                    curExpiryMs = Number.isFinite(parsed) ? parsed : 0;
+                  } else if (curExpiresDate) {
+                    const parsed = Date.parse(curExpiresDate + "T23:59:59Z");
+                    curExpiryMs = Number.isFinite(parsed) ? parsed : 0;
+                  }
+
+                  const isExpired = curExpiryMs > 0 && curExpiryMs <= now.getTime();
+                  if (!isExpired) {
+                    continue;
+                  }
+
+                  await setSingleSelect(item.id, statusFieldId, optAvailable);
+                  await clearField(item.id, ownerFieldId);
+                  await clearField(item.id, purposeFieldId);
+                  await clearField(item.id, branchFieldId);
+                  await clearField(item.id, expiresDateFieldId);
+                  await clearField(item.id, expiresUtcFieldId);
+
+                  released += 1;
+                  core.notice(`Released "${name}" (expired: ${curExpiresUtc || curExpiresDate || "unknown"})`);
+                }
+
+                const pageInfo = proj?.node?.items?.pageInfo;
+                if (!pageInfo?.hasNextPage) {
+                  break;
+                }
+                cursor = pageInfo.endCursor;
+              }
+
+              if (!targetAll && matched === 0) {
+                throw new Error(`Env row "${rawEnvName}" not found in Project.`);
+              }
+
+              core.notice(`Scan complete. scanned=${scanned} matched=${matched} released=${released}`);
+            }
+
+            try {
+              await main();
+            } catch (err) {
+              const msg = (err && err.message) ? err.message : String(err);
+              core.setFailed(`Release failed: ${msg}`);
+            }
