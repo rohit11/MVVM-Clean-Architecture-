@@ -44,8 +44,7 @@ jobs:
           PURPOSE_FIELD_ID: ${{ vars.PURPOSE_FIELD_ID }}
           BRANCH_FIELD_ID: ${{ vars.BRANCH_FIELD_ID }}
 
-          EXPIRES_DATE_FIELD_ID: ${{ vars.EXPIRES_DATE_FIELD_ID }}     # Date field (UI)
-          EXPIRES_UTC_FIELD_ID: ${{ vars.EXPIRES_UTC_FIELD_ID }}  # Text field (accurate TTL; recommended)
+          EXPIRES_UTC_FIELD_ID: ${{ vars.EXPIRES_UTC_FIELD_ID }}  # Text field (date + time)
         with:
           github-token: ${{ secrets.PROJECTS_TOKEN }}
           script: |
@@ -64,8 +63,7 @@ jobs:
              *      - Status = IN USE
              *      - Owner = context.actor (who ran workflow)
              *      - Purpose = input
-             *      - Expires (Date) = YYYY-MM-DD (UI)
-             *      - Expires UTC (Text) = ISO timestamp (accurate TTL; recommended)
+             *      - Expires UTC (Text) = ISO timestamp (date + time)
              */
 
             async function main() {
@@ -102,8 +100,7 @@ jobs:
               const purposeFieldId = process.env.PURPOSE_FIELD_ID;
               const branchFieldId = process.env.BRANCH_FIELD_ID;
 
-              const expiresDateFieldId = process.env.EXPIRES_DATE_FIELD_ID;
-              const expiresUtcFieldId = (process.env.EXPIRES_UTC_FIELD_ID || "").trim(); // optional but recommended
+              const expiresUtcFieldId = (process.env.EXPIRES_UTC_FIELD_ID || "").trim();
 
               const required = {
                 PROJECT_ID: projectId,
@@ -112,8 +109,7 @@ jobs:
                 STATUS_INUSE_OPTION_ID: optInUse,
                 OWNER_FIELD_ID: ownerFieldId,
                 PURPOSE_FIELD_ID: purposeFieldId,
-                BRANCH_FIELD_ID: branchFieldId,
-                EXPIRES_DATE_FIELD_ID: expiresDateFieldId
+                BRANCH_FIELD_ID: branchFieldId
               };
               for (const [k, v] of Object.entries(required)) {
                 if (!v) throw new Error(`Missing repo variable: ${k}`);
@@ -124,7 +120,6 @@ jobs:
 
               // ---- Compute NEW expiry (used only when acquiring a new lock) ----
               const newExpiresAtIso = new Date(now.getTime() + ttlHours * 60 * 60 * 1000).toISOString();
-              const newExpiresAtDateOnly = newExpiresAtIso.slice(0, 10); // YYYY-MM-DD
 
               // ---- Fetch project items and field values ----
               let item = null;
@@ -171,10 +166,6 @@ jobs:
                                   text
                                   field { ... on ProjectV2FieldCommon { id name } }
                                 }
-                                ... on ProjectV2ItemFieldDateValue {
-                                  date
-                                  field { ... on ProjectV2FieldCommon { id name } }
-                                }
                                 ... on ProjectV2ItemFieldSingleSelectValue {
                                   name
                                   optionId
@@ -218,25 +209,14 @@ jobs:
                 );
                 return v ? v.text : "";
               }
-              function getDate(fieldId) {
-                const v = item.fieldValues.nodes.find(
-                  n => n.__typename === "ProjectV2ItemFieldDateValue" && n.field?.id === fieldId
-                );
-                return v ? v.date : "";
-              }
-
               const curStatus = getSingleSelect(statusFieldId);
               const curOwner = getText(ownerFieldId);
               const curExpiresUtc = expiresUtcFieldId ? getText(expiresUtcFieldId) : "";
-              const curExpiresDate = getDate(expiresDateFieldId);
 
               // ---- Determine expiry ----
               let curExpiryMs = 0;
               if (curExpiresUtc) {
                 const parsed = Date.parse(curExpiresUtc);
-                curExpiryMs = Number.isFinite(parsed) ? parsed : 0;
-              } else if (curExpiresDate) {
-                const parsed = Date.parse(curExpiresDate + "T23:59:59Z");
                 curExpiryMs = Number.isFinite(parsed) ? parsed : 0;
               }
 
@@ -257,7 +237,7 @@ jobs:
                 (!curStatus); // treat empty status as available-ish
 
               core.notice(`Matched "${envName}" itemId=${itemId}`);
-              core.notice(`Current status="${curStatus?.name || "n/a"}" owner="${curOwner}" expiresUtc="${curExpiresUtc}" expiresDate="${curExpiresDate}" expired=${isExpired}`);
+              core.notice(`Current status="${curStatus?.name || "n/a"}" owner="${curOwner}" expiresUtc="${curExpiresUtc}" expired=${isExpired}`);
 
               // ---- BLOCKED rule ----
               if (isBlocked) {
@@ -293,21 +273,6 @@ jobs:
                   }
                 `, { projectId, itemId, fieldId, text });
               }
-              async function setDate(fieldId, dateStr) {
-                await github.graphql(`
-                  mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $date: Date!) {
-                    updateProjectV2ItemFieldValue(
-                      input: {
-                        projectId: $projectId,
-                        itemId: $itemId,
-                        fieldId: $fieldId,
-                        value: { date: $date }
-                      }
-                    ) { projectV2Item { id } }
-                  }
-                `, { projectId, itemId, fieldId, date: dateStr });
-              }
-
               // ---- IN USE + NOT EXPIRED rule (no auto-extend) ----
               if (isInUse && !isExpired) {
                 if (curOwner && curOwner.toLowerCase() === actor.toLowerCase()) {
@@ -319,11 +284,11 @@ jobs:
                   core.setOutput("ok", "true");
                   core.setOutput("action", "noop_same_owner");
                   core.setOutput("message", `Env "${envName}" is already locked by you. Keeping existing expiry (no auto-extend).`);
-                  core.notice(`No-op (same owner). Kept existing expiry: ${curExpiresUtc || curExpiresDate || "unknown"}`);
+                  core.notice(`No-op (same owner). Kept existing expiry: ${curExpiresUtc || "unknown"}`);
                   return;
                 } else {
                   // Different owner: do not overwrite
-                  throw new Error(`Env "${envName}" is already In Use by "${curOwner}". Expires: ${curExpiresUtc || curExpiresDate || "unknown"}.`);
+                  throw new Error(`Env "${envName}" is already In Use by "${curOwner}". Expires: ${curExpiresUtc || "unknown"}.`);
                 }
               }
 
@@ -334,7 +299,6 @@ jobs:
                 await setText(ownerFieldId, actor);
                 await setText(purposeFieldId, purpose);
                 await setText(branchFieldId, branchName);
-                await setDate(expiresDateFieldId, newExpiresAtDateOnly);
 
                 if (expiresUtcFieldId) {
                   await setText(expiresUtcFieldId, newExpiresAtIso);

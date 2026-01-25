@@ -33,8 +33,7 @@ jobs:
           PURPOSE_FIELD_ID: ${{ vars.PURPOSE_FIELD_ID }}
           BRANCH_FIELD_ID: ${{ vars.BRANCH_FIELD_ID }}
 
-          EXPIRES_DATE_FIELD_ID: ${{ vars.EXPIRES_DATE_FIELD_ID }}     # Date field (UI)
-          EXPIRES_UTC_FIELD_ID: ${{ vars.EXPIRES_UTC_FIELD_ID }}  # Text field (accurate TTL; recommended)
+          EXPIRES_UTC_FIELD_ID: ${{ vars.EXPIRES_UTC_FIELD_ID }}  # Text field (date + time)
         with:
           github-token: ${{ secrets.PROJECTS_TOKEN }}
           script: |
@@ -42,7 +41,7 @@ jobs:
              * BUSINESS LOGIC (Release expired)
              * --------------------------------
              * - Only act on items with Status == IN USE.
-             * - If expired (UTC preferred), set Status = AVAILABLE and clear other fields.
+             * - If expired (UTC), set Status = AVAILABLE and clear other fields.
              * - Skip BLOCKED and AVAILABLE items.
              * - Manual run can target one env; schedule always checks all.
              */
@@ -64,7 +63,6 @@ jobs:
               const purposeFieldId = process.env.PURPOSE_FIELD_ID;
               const branchFieldId = (process.env.BRANCH_FIELD_ID || "").trim();
 
-              const expiresDateFieldId = process.env.EXPIRES_DATE_FIELD_ID;
               const expiresUtcFieldId = (process.env.EXPIRES_UTC_FIELD_ID || "").trim();
 
               const required = {
@@ -73,8 +71,7 @@ jobs:
                 STATUS_AVAILABLE_OPTION_ID: optAvailable,
                 STATUS_INUSE_OPTION_ID: optInUse,
                 OWNER_FIELD_ID: ownerFieldId,
-                PURPOSE_FIELD_ID: purposeFieldId,
-                EXPIRES_DATE_FIELD_ID: expiresDateFieldId
+                PURPOSE_FIELD_ID: purposeFieldId
               };
               for (const [k, v] of Object.entries(required)) {
                 if (!v) throw new Error(`Missing repo variable: ${k}`);
@@ -111,13 +108,6 @@ jobs:
                 );
                 return v ? v.text : "";
               }
-              function getDate(item, fieldId) {
-                const v = item.fieldValues.nodes.find(
-                  n => n.__typename === "ProjectV2ItemFieldDateValue" && n.field?.id === fieldId
-                );
-                return v ? v.date : "";
-              }
-
               async function setSingleSelect(itemId, fieldId, optionId) {
                 await github.graphql(`
                   mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
@@ -178,10 +168,6 @@ jobs:
                                   text
                                   field { ... on ProjectV2FieldCommon { id name } }
                                 }
-                                ... on ProjectV2ItemFieldDateValue {
-                                  date
-                                  field { ... on ProjectV2FieldCommon { id name } }
-                                }
                                 ... on ProjectV2ItemFieldSingleSelectValue {
                                   name
                                   optionId
@@ -226,14 +212,10 @@ jobs:
                   }
 
                   const curExpiresUtc = expiresUtcFieldId ? getText(item, expiresUtcFieldId) : "";
-                  const curExpiresDate = getDate(item, expiresDateFieldId);
 
                   let curExpiryMs = 0;
                   if (curExpiresUtc) {
                     const parsed = Date.parse(curExpiresUtc);
-                    curExpiryMs = Number.isFinite(parsed) ? parsed : 0;
-                  } else if (curExpiresDate) {
-                    const parsed = Date.parse(curExpiresDate + "T23:59:59Z");
                     curExpiryMs = Number.isFinite(parsed) ? parsed : 0;
                   }
 
@@ -246,11 +228,10 @@ jobs:
                   await clearField(item.id, ownerFieldId);
                   await clearField(item.id, purposeFieldId);
                   await clearField(item.id, branchFieldId);
-                  await clearField(item.id, expiresDateFieldId);
                   await clearField(item.id, expiresUtcFieldId);
 
                   released += 1;
-                  core.notice(`Released "${name}" (expired: ${curExpiresUtc || curExpiresDate || "unknown"})`);
+                  core.notice(`Released "${name}" (expired: ${curExpiresUtc || "unknown"})`);
                 }
 
                 const pageInfo = proj?.node?.items?.pageInfo;
