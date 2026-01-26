@@ -84,6 +84,7 @@ jobs:
               const targetName = norm(rawEnvName);
               const now = new Date();
               const updatedAtIso = now.toISOString();
+              const actor = context.actor;
 
               // ---- Fetch project items and field values ----
               let cursor = null;
@@ -244,7 +245,7 @@ jobs:
                   }
 
                   await setSingleSelect(item.id, statusFieldId, optAvailable);
-                  await clearField(item.id, ownerFieldId);
+                  await setText(item.id, ownerFieldId, actor);
                   await clearField(item.id, purposeFieldId);
                   await clearField(item.id, branchFieldId);
                   await clearField(item.id, expiresUtcFieldId);
