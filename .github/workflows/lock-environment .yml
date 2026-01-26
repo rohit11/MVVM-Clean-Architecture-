@@ -11,6 +11,22 @@ on:
         description: "Branch name to record on the Project item"
         required: true
         type: string
+      component_name:
+        description: "Component name to deploy"
+        required: true
+        type: string
+      component_version:
+        description: "Component version to deploy"
+        required: true
+        type: string
+      neptune_tenant:
+        description: "Neptune tenant to run on"
+        required: true
+        type: string
+      aws_region:
+        description: "AWS region to deploy to"
+        required: true
+        type: string
       ttl_hours:
         description: "How many hours to lock this env (used only when acquiring a NEW lock, or when extending explicitly)"
         required: true
@@ -72,6 +88,10 @@ jobs:
               const dispatchInputs = context.payload.inputs || {};
               const envName = String(dispatchInputs.env_name || "").trim();
               const branchName = String(dispatchInputs.branch_name || "").trim();
+              const componentName = String(dispatchInputs.component_name || "").trim();
+              const componentVersion = String(dispatchInputs.component_version || "").trim();
+              const neptuneTenant = String(dispatchInputs.neptune_tenant || "").trim();
+              const awsRegion = String(dispatchInputs.aws_region || "").trim();
               const purpose = String(dispatchInputs.purpose || "").trim();
               const ttlHoursRaw = String(dispatchInputs.ttl_hours || "").trim();
               const ttlHours = Number(ttlHoursRaw);
@@ -84,6 +104,18 @@ jobs:
               }
               if (!branchName) {
                 throw new Error("Invalid branch_name: value is required.");
+              }
+              if (!componentName) {
+                throw new Error("Invalid component_name: value is required.");
+              }
+              if (!componentVersion) {
+                throw new Error("Invalid component_version: value is required.");
+              }
+              if (!neptuneTenant) {
+                throw new Error("Invalid neptune_tenant: value is required.");
+              }
+              if (!awsRegion) {
+                throw new Error("Invalid aws_region: value is required.");
               }
               if (!Number.isFinite(ttlHours) || ttlHours <= 0) {
                 throw new Error(`Invalid ttl_hours="${ttlHoursRaw}". Must be a positive number.`);
@@ -121,6 +153,23 @@ jobs:
               const actor = context.actor;
               const now = new Date();
               const updatedAtIso = now.toISOString();
+
+              // ---- Export inputs for downstream steps ----
+              core.exportVariable("COMPONENT_NAME", componentName);
+              core.exportVariable("COMPONENT_VERSION", componentVersion);
+              core.exportVariable("NEPTUNE_TENANT", neptuneTenant);
+              core.exportVariable("AWS_REGION", awsRegion);
+              core.exportVariable("BRANCH_NAME", branchName);
+              core.exportVariable("PURPOSE", purpose);
+              core.exportVariable("ENV_NAME", envName);
+
+              core.setOutput("component_name", componentName);
+              core.setOutput("component_version", componentVersion);
+              core.setOutput("neptune_tenant", neptuneTenant);
+              core.setOutput("aws_region", awsRegion);
+              core.setOutput("branch_name", branchName);
+              core.setOutput("purpose", purpose);
+              core.setOutput("env_name", envName);
 
               // ---- Compute NEW expiry (used only when acquiring a new lock) ----
               const newExpiresAtIso = new Date(now.getTime() + ttlHours * 60 * 60 * 1000).toISOString();
