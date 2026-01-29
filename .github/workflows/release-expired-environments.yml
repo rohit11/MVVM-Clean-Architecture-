@@ -246,9 +246,6 @@ jobs:
 
                   await setSingleSelect(item.id, statusFieldId, optAvailable);
                   await setText(item.id, ownerFieldId, actor);
-                  await clearField(item.id, purposeFieldId);
-                  await clearField(item.id, branchFieldId);
-                  await clearField(item.id, expiresUtcFieldId);
                   await setText(item.id, updatedAtFieldId, updatedAtIso);
 
                   released += 1;
