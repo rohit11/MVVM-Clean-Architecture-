@@ -401,6 +401,31 @@ jobs:
               core.warning(`Lock failed: ${msg}`);
             }
 
+      # Example: call a reusable workflow in another repo (waits automatically)
+      # - name: Deploy via reusable workflow
+      #   if: steps.lock_env.outputs.ok == 'true'
+      #   uses: your-org/your-repo/.github/workflows/deploy.yml@main
+      #   with:
+      #     component_name: ${{ steps.lock_env.outputs.component_name }}
+      #     component_version: ${{ steps.lock_env.outputs.component_version }}
+      #     neptune_tenant: ${{ steps.lock_env.outputs.neptune_tenant }}
+      #     aws_region: ${{ steps.lock_env.outputs.aws_region }}
+      #   secrets: inherit
+      #
+      # Example: send email after deploy workflow completes
+      # - name: Send email notification (example)
+      #   if: steps.lock_env.outputs.ok == 'true'
+      #   run: |
+      #     echo "Subject: Deploy completed" > mail.txt
+      #     echo "Deploy finished for ${{ steps.lock_env.outputs.component_name }}:${{ steps.lock_env.outputs.component_version }}" >> mail.txt
+      #     echo "Tenant: ${{ steps.lock_env.outputs.neptune_tenant }}, Region: ${{ steps.lock_env.outputs.aws_region }}" >> mail.txt
+      #     # Example using a webhook-based email service:
+      #     # curl -X POST -H "Content-Type: application/json" \
+      #     #   -d @mail.txt \
+      #     #   ${{ secrets.EMAIL_WEBHOOK_URL }}
+      #     #
+      #     # Or configure an email action you use internally.
+
       - name: Fail job (after emailing)
         if: steps.lock_env.outputs.ok == 'false'
         run: |
