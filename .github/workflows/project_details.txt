@@ -1,0 +1,73 @@
+PROJECT_ID: ${{ vars.PROJECT_ID }}
+
+          STATUS_FIELD_ID: ${{ vars.STATUS_FIELD_ID }}
+          STATUS_AVAILABLE_OPTION_ID: ${{ vars.STATUS_AVAILABLE_OPTION_ID }}
+          STATUS_INUSE_OPTION_ID: ${{ vars.STATUS_INUSE_OPTION_ID }}
+          STATUS_BLOCKED_OPTION_ID: ${{ vars.STATUS_BLOCKED_OPTION_ID }}
+
+          OWNER_FIELD_ID: ${{ vars.OWNER_FIELD_ID }}
+          PURPOSE_FIELD_ID: ${{ vars.PURPOSE_FIELD_ID }}
+
+          EXPIRES_DATE_FIELD_ID: ${{ vars.EXPIRES_FIELD_ID }}     # Date field (UI)
+          EXPIRES_UTC_FIELD_ID: ${{ vars.EXPIRES_UTC_FIELD_ID }} 
+
+
+
+PROJECT_ID = 
+STATUS_FIELD_ID =  
+STATUS_AVAILABLE_OPTION_ID =  
+STATUS_INUSE_OPTION_ID  = 
+STATUS_BLOCKED_OPTION_ID =  
+OWNER_FIELD_ID = 
+EXPIRES_DATE_FIELD_ID =  
+EXPIRES_UTC_FIELD_ID =  
+UPDATED_AT_FIELD_ID  =  
+BRANCH_FIELD_ID =  
+UPDATED_AT_UTC_FIELD_ID = 
+
+gh api graphql -f query='               
+query($login:String!, $number:Int!) {
+  user(login:$login) {
+    projectV2(number:$number) {
+      id
+      title
+      url
+    }
+  }
+}' -f login='rohit11' -F number=2
+
+
+Output
+{
+  "data": {
+    "user": {
+      "projectV2": {
+        "id": "PVT_kwHOAAHQDM4BNQzI",
+        "title": "Environment Pool",
+        "url": "https://github.com/users/rohit11/projects/2"
+      }
+    }
+  }
+}
+
+
+export PROJECT_ID=""
+
+
+
+gh api graphql -f query='
+query($projectId:ID!) {
+  node(id:$projectId) {
+    ... on ProjectV2 {
+      fields(first:100) {
+        nodes {
+          __typename
+          ... on ProjectV2FieldCommon { id name dataType }
+          ... on ProjectV2SingleSelectField {
+            options { id name }
+          }
+        }
+      }
+    }
+  }
+}' -f projectId="$PROJECT_ID"
